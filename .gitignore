@@ -1,4 +1,4 @@
 *.DS_Store
-*_back.js
-client--readme.md
-server--readme.md
+# *_back.js
+# client--readme.md
+# server--readme.md
