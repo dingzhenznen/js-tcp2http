@@ -1,0 +1,12 @@
+{
+  "name": "js-tcp2http",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "server": "node server.js",
+    "demo": "node client-demo.js",
+    "tcp-server": "node tcp-server-start.js",
+    "tcp-server-demo": "node tcp-server-demo.js"
+  }
+}
