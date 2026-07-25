@@ -61,24 +61,69 @@ npm run tcp-server-demo
 
 ## Client 用法
 
+`tcp-http-client.js` 只导出一个 `TcpHttpClient` 对象，使用方式接近 Node 原生 `http` 模块：
+
 ```js
-import { TcpHttpClient } from './tcp-http-client.js';
+import TcpHttpClient from './tcp-http-client.js';
 
-const client = new TcpHttpClient();
+TcpHttpClient.get('http://127.0.0.1:3001/books?id=1', (res) => {
+  const chunks = [];
 
-const response = await client.post(
-  'http://localhost:3000/users',
-  { name: 'tom' },
-  {
-    headers: {
-      'Content-Type': 'application/json'
-    }
-  }
-);
+  console.log(res.statusCode);
 
-console.log(response.statusCode);
-console.log(response.headers);
-console.log(response.body);
+  res.on('data', (chunk) => {
+    chunks.push(chunk);
+  });
+
+  res.on('end', () => {
+    console.log(Buffer.concat(chunks).toString('utf8'));
+  });
+});
+
+req.on('socket', (socket) => {
+  console.log(socket.constructor.name);
+});
+
+req.on('tcpConnect', () => {
+  console.log('TCP connected');
+});
+```
+
+`TcpHttpClient.request()` 和原生 `http.request()` 一样，需要手动 `req.end()`：
+
+```js
+import TcpHttpClient from './tcp-http-client.js';
+
+const req = TcpHttpClient.request('http://127.0.0.1:3001/books?id=1', (res) => {
+  console.log(res.statusCode);
+});
+
+req.end();
+```
+
+`CONNECT` 方法会触发 `connect` 事件：
+
+```js
+import TcpHttpClient from './tcp-http-client.js';
+
+const req = TcpHttpClient.request({
+  hostname: '127.0.0.1',
+  port: 3001,
+  method: 'CONNECT',
+  path: 'www.google.com:80'
+});
+
+req.on('connect', (res, socket, head) => {
+  console.log(res.statusCode);
+  socket.write(
+    'GET / HTTP/1.1\r\n' +
+      'Host: www.google.com:80\r\n' +
+      'Connection: close\r\n' +
+      '\r\n'
+  );
+});
+
+req.end();
 ```
 
 `TcpHttpClient` 做的事情：

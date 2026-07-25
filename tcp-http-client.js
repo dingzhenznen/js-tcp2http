@@ -1,46 +1,230 @@
 import net from 'node:net';
+import { EventEmitter } from 'node:events';
 
-export class TcpHttpClient {
-  async request(url, options = {}) {
-    const target = typeof url === 'string' ? new URL(url) : url;
+export function request(urlOrOptions, optionsOrCallback, callback) {
+  const { options, cb } = normalizeRequestArgs(urlOrOptions, optionsOrCallback, callback);
+  const req = new TcpClientRequest(options);
+
+  if (cb) {
+    req.on('response', cb);
+  }
+
+  return req;
+}
+
+export function get(urlOrOptions, optionsOrCallback, callback) {
+  const req = request(
+    urlOrOptions,
+    withGetMethod(optionsOrCallback),
+    typeof optionsOrCallback === 'function' ? optionsOrCallback : callback
+  );
+  req.end();
+  return req;
+}
+
+
+
+export default {
+  request,
+  get
+};
+
+class TcpClientRequest extends EventEmitter {
+  constructor(options) {
+    super();
+    this.options = options;
+    this.bodyChunks = [];
+    this.ended = false;
+    this.connectEmitted = false;
+    this.socket = null;
+  }
+
+  write(chunk) {
+    this.bodyChunks.push(toBuffer(chunk));
+  }
+
+  end(chunk) {
+    if (chunk !== undefined) {
+      this.write(chunk);
+    }
+
+    if (this.ended) {
+      return;
+    }
+
+    this.ended = true;
+    this.start();
+  }
+
+  start() {
+    const body = Buffer.concat(this.bodyChunks);
+    const headers = normalizeHeaders(this.options.headers);
+
+    headers.host ??= this.options.hostHeader;
+    headers.connection ??= this.options.method === 'CONNECT' ? 'keep-alive' : 'close';
+
+    if (body.length > 0 && headers['content-length'] === undefined) {
+      headers['content-length'] = body.length;
+    }
+
+    const requestBuffer = buildRequestBuffer(
+      this.options.method,
+      this.options.path,
+      headers,
+      body
+    );
+    const socket = net.connect({ host: this.options.hostname, port: this.options.port });
+    const chunks = [];
+
+    this.socket = socket;
+    this.emit('socket', socket);
+
+    socket.on('connect', () => {
+      this.emit('tcpConnect', socket);
+      socket.write(requestBuffer);
+    });
+
+    socket.on('data', (chunk) => {
+      chunks.push(chunk);
+
+      if (this.options.method === 'CONNECT') {
+        this.maybeEmitConnect(Buffer.concat(chunks), socket);
+      }
+    });
+
+    socket.on('end', () => {
+      if (this.options.method === 'CONNECT') {
+        return;
+      }
+
+      this.emitResponse(Buffer.concat(chunks));
+    });
+
+    socket.on('error', (error) => {
+      this.emit('error', error);
+    });
+  }
+
+  maybeEmitConnect(buffer, socket) {
+    const headerEnd = buffer.indexOf('\r\n\r\n');
+
+    if (headerEnd === -1 || this.connectEmitted) {
+      return;
+    }
+
+    this.connectEmitted = true;
+    const res = parseHttpResponseHeader(buffer.subarray(0, headerEnd));
+    const head = buffer.subarray(headerEnd + 4);
+    this.emit('connect', res, socket, head);
+  }
+
+  emitResponse(buffer) {
+    try {
+      const res = parseHttpResponse(buffer);
+      this.emit('response', res);
+      res.emitBody();
+    } catch (error) {
+      this.emit('error', error);
+    }
+  }
+}
+
+class TcpIncomingMessage extends EventEmitter {
+  constructor({ statusCode, statusMessage, headers, bodyBuffer }) {
+    super();
+    this.statusCode = statusCode;
+    this.statusMessage = statusMessage;
+    this.headers = headers;
+    this.bodyBuffer = bodyBuffer;
+    this.body = bodyBuffer.toString('utf8');
+  }
+
+  emitBody() {
+    if (this.bodyBuffer.length > 0) {
+      this.emit('data', this.bodyBuffer);
+    }
+
+    this.emit('end');
+  }
+}
+
+function normalizeRequestArgs(urlOrOptions, optionsOrCallback, callback) {
+  let options;
+  let cb = callback;
+
+  if (typeof urlOrOptions === 'string' || urlOrOptions instanceof URL) {
+    const target = typeof urlOrOptions === 'string' ? new URL(urlOrOptions) : urlOrOptions;
 
     if (target.protocol !== 'http:') {
       throw new Error(`Only http: URLs are supported, received ${target.protocol}`);
     }
 
-    const method = options.method ?? 'GET';
-    const hostname = options.hostname ?? target.hostname;
-    const targetPort = target.port || 80;
-    const port = Number(options.port ?? targetPort);
-    const path = `${target.pathname || '/'}${target.search || ''}`;
-    const body = normalizeBody(options.body);
-    const headers = normalizeHeaders(options.headers);
+    options = {
+      ...(typeof optionsOrCallback === 'object' ? optionsOrCallback : {}),
+      hostname: target.hostname,
+      port: Number(target.port || 80),
+      path: `${target.pathname || '/'}${target.search || ''}`,
+      hostHeader: target.port ? `${target.hostname}:${target.port}` : target.hostname
+    };
 
-    headers.host ??= target.port ? `${target.hostname}:${target.port}` : target.hostname;
-    headers.connection ??= 'close';
-
-    if (body && headers['content-length'] === undefined) {
-      headers['content-length'] = Buffer.byteLength(body);
+    if (typeof optionsOrCallback === 'function') {
+      cb = optionsOrCallback;
     }
+  } else {
+    options = { ...urlOrOptions };
 
-    const requestText = buildRequestText(method, path, headers, body);
-    const responseBuffer = await sendByTcp({ hostname, port, requestText });
-
-    return parseHttpResponse(responseBuffer);
+    if (typeof optionsOrCallback === 'function') {
+      cb = optionsOrCallback;
+    }
   }
 
-  get(url, options = {}) {
-    return this.request(url, { ...options, method: 'GET' });
+  const hostParts = parseHost(options.host);
+  const hostname = options.hostname ?? hostParts.hostname ?? 'localhost';
+  const port = Number(options.port ?? hostParts.port ?? 80);
+  const method = (options.method ?? 'GET').toUpperCase();
+  const path = options.path ?? (method === 'CONNECT' ? `${hostname}:${port}` : '/');
+  const hostHeader = options.hostHeader ?? options.headers?.host ?? options.headers?.Host ?? buildHostHeader(hostname, port);
+
+  return {
+    cb,
+    options: {
+      ...options,
+      hostname,
+      port,
+      method,
+      path,
+      hostHeader
+    }
+  };
+}
+
+function parseHost(host) {
+  if (!host) {
+    return {};
   }
 
-  post(url, body, options = {}) {
-    return this.request(url, { ...options, method: 'POST', body });
+  const [hostname, port] = String(host).split(':');
+  return {
+    hostname,
+    port: port ? Number(port) : undefined
+  };
+}
+
+function buildHostHeader(hostname, port) {
+  return port === 80 ? hostname : `${hostname}:${port}`;
+}
+
+function withGetMethod(optionsOrCallback) {
+  if (typeof optionsOrCallback === 'function' || optionsOrCallback === undefined) {
+    return undefined;
   }
+
+  return { ...optionsOrCallback, method: 'GET' };
 }
 
 function normalizeBody(body) {
   if (body === undefined || body === null) {
-    return '';
+    return Buffer.alloc(0);
   }
 
   if (Buffer.isBuffer(body)) {
@@ -48,10 +232,10 @@ function normalizeBody(body) {
   }
 
   if (typeof body === 'string') {
-    return body;
+    return Buffer.from(body);
   }
 
-  return JSON.stringify(body);
+  return Buffer.from(JSON.stringify(body));
 }
 
 function normalizeHeaders(headers = {}) {
@@ -64,17 +248,14 @@ function normalizeHeaders(headers = {}) {
   return normalized;
 }
 
-function buildRequestText(method, path, headers, body) {
+function buildRequestBuffer(method, path, headers, body) {
   const lines = [`${method.toUpperCase()} ${path} HTTP/1.1`];
 
   for (const [key, value] of Object.entries(headers)) {
     lines.push(`${formatHeaderName(key)}: ${value}`);
   }
 
-  return Buffer.concat([
-    Buffer.from(`${lines.join('\r\n')}\r\n\r\n`),
-    Buffer.isBuffer(body) ? body : Buffer.from(body)
-  ]);
+  return Buffer.concat([Buffer.from(`${lines.join('\r\n')}\r\n\r\n`), toBuffer(body)]);
 }
 
 function formatHeaderName(headerName) {
@@ -84,41 +265,6 @@ function formatHeaderName(headerName) {
     .join('-');
 }
 
-function sendByTcp({ hostname, port, requestText }) {
-  return new Promise((resolve, reject) => {
-
-    // net.createConnection
-    const socket = net.connect({ host: hostname, port });
-    // net.connect 源码简化就是 创建 socket = new Socket(options) 然后 socket.connect(args)
-    // function connect(...args) {
-    //   const socket = new Socket(options);
-    //   return socket.connect(args);
-    // }
-
-    // net.connect({ host: hostname, port }, () => {
-    //   console.log('connected to server');
-    // });
-
-    console.log('socket class:', socket.constructor.name);
-    console.log('is net.Socket:', socket instanceof net.Socket);
-    const chunks = [];
-
-    socket.on('connect', () => {
-      socket.write(requestText);
-    });
-
-    socket.on('data', (chunk) => {
-      chunks.push(chunk);
-    });
-
-    socket.on('end', () => {
-      resolve(Buffer.concat(chunks));
-    });
-
-    socket.on('error', reject);
-  });
-}
-
 function parseHttpResponse(buffer) {
   const headerEnd = buffer.indexOf('\r\n\r\n');
 
@@ -126,8 +272,20 @@ function parseHttpResponse(buffer) {
     throw new Error('Invalid HTTP response: missing header separator');
   }
 
-  const headerText = buffer.subarray(0, headerEnd).toString('latin1');
+  const res = parseHttpResponseHeader(buffer.subarray(0, headerEnd));
   const rawBody = buffer.subarray(headerEnd + 4);
+  const bodyBuffer = decodeBody(rawBody, res.headers);
+
+  return new TcpIncomingMessage({
+    statusCode: res.statusCode,
+    statusMessage: res.statusMessage,
+    headers: res.headers,
+    bodyBuffer
+  });
+}
+
+function parseHttpResponseHeader(buffer) {
+  const headerText = buffer.toString('latin1');
   const [statusLine, ...headerLines] = headerText.split('\r\n');
   const statusMatch = statusLine.match(/^HTTP\/\d(?:\.\d)?\s+(\d{3})\s*(.*)$/);
 
@@ -135,16 +293,12 @@ function parseHttpResponse(buffer) {
     throw new Error(`Invalid HTTP status line: ${statusLine}`);
   }
 
-  const headers = parseHeaders(headerLines);
-  const bodyBuffer = decodeBody(rawBody, headers);
-
-  return {
+  return new TcpIncomingMessage({
     statusCode: Number(statusMatch[1]),
     statusMessage: statusMatch[2],
-    headers,
-    body: bodyBuffer.toString('utf8'),
-    bodyBuffer
-  };
+    headers: parseHeaders(headerLines),
+    bodyBuffer: Buffer.alloc(0)
+  });
 }
 
 function parseHeaders(headerLines) {
@@ -213,4 +367,8 @@ function decodeChunkedBody(buffer) {
   }
 
   return Buffer.concat(chunks);
+}
+
+function toBuffer(value) {
+  return Buffer.isBuffer(value) ? value : Buffer.from(value);
 }
