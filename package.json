@@ -10,6 +10,7 @@
     "tcp-server-demo": "node tcp-server-demo.js"
   },
   "dependencies": {
-    "axios": "^1.18.1"
+    "axios": "^1.18.1",
+    "http-proxy-agent": "^9.1.0"
   }
 }
