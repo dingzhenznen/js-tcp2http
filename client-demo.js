@@ -8,6 +8,7 @@ function runGetDemo() {
     const req = TcpHttpClient.get('http://127.0.0.1:3001/books?id=1', (res) => {
       console.log('GET status:', res.statusCode);
 
+      // 请求后服务的的 相应数据
       res.on('data', (chunk) => {
         console.log('GET body:', chunk.toString());
       });
@@ -61,6 +62,10 @@ function runConnectDemo() {
       });
 
       socket.on('error', reject);
+    });
+
+    req.on('response', () => {
+      console.log('CONNECT TCP 22222222');
     });
 
     req.on('error', reject);

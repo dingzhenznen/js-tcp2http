@@ -74,6 +74,19 @@ class TcpClientRequest extends EventEmitter {
       body
     );
     const socket = net.connect({ host: this.options.hostname, port: this.options.port });
+
+
+        // net.createConnection
+        // const socket = net.connect({ host: hostname, port });
+        // net.connect 源码简化就是 创建 socket = new Socket(options) 然后 socket.connect(args)
+        // function connect(...args) {
+        //   const socket = new Socket(options);
+        //   return socket.connect(args);
+        // }
+    
+        // net.connect({ host: hostname, port }, () => {
+        //   console.log('connected to server');
+        // });
     const chunks = [];
 
     this.socket = socket;
@@ -94,7 +107,7 @@ class TcpClientRequest extends EventEmitter {
 
     socket.on('end', () => {
       if (this.options.method === 'CONNECT') {
-        return;
+        //return;
       }
 
       this.emitResponse(Buffer.concat(chunks));
