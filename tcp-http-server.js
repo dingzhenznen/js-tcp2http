@@ -5,6 +5,7 @@ export class TcpHttpServer {
   constructor(handler) {
     this.handler = handler;
     this.server = net.createServer((socket) => {
+      //socket.write()
       this.handleSocket(socket);
     });
   }
